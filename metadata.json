@@ -1,0 +1,6 @@
+{
+  "name": "Pasar Malam 2026 Gate Scanner",
+  "description": "Mobile-first event gate check-in and QR ticket validation scanner for Pasar Malam 2026",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
