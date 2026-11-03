@@ -3,22 +3,27 @@ Pasar Malam 2026 Gate Scanner - Flask Backend
 Event Gate Check-in & QR Ticket Validation System
 
 Endpoints:
-  GET  /             - Serves the Single Page Application index
-  GET  /api/tickets  - Fetches ticket dataset (Google Sheet CSV or local fallback)
-  POST /api/checkin  - Validates and checks in attendee by id_tiket
-  GET  /api/export   - Generates & downloads current updated CSV dataset
-  POST /api/sync     - Forces a re-fetch from the configured Google Sheet CSV URL
+  GET  /                          - Serves the Single Page Application index
+  GET  /api/tickets               - Fetches ticket dataset (Google Sheet CSV or local fallback)
+  POST /api/checkin               - Validates and checks in attendee by id_tiket
+  POST /api/checkin-batch         - Validates and checks in group of tickets by id_tikets
+  POST /api/attendees/add         - Registers on-site walk-in attendee
+  POST /api/attendees/update-ticket-id - Operator updates ticket numbers
+  GET  /api/export                - Generates & downloads current updated CSV dataset
+  POST /api/sync                  - Forces a re-fetch from the configured Google Sheet CSV URL
 """
 
 import os
 import csv
 import io
+import random
+import string
 from datetime import datetime
 from flask import Flask, jsonify, request, send_file, send_from_directory
 
 # ==============================================================================
 # CONFIGURATION
-# Set your published Google Sheet CSV Export URL below to enable dynamic live sync.
+# Set your published Google Sheet CSV Export URL below in CODE (not via UI):
 # e.g.: "https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID>/gviz/tq?tqx=out:csv&sheet=All%20Tickets"
 # ==============================================================================
 GOOGLE_SHEET_CSV_URL = os.environ.get("GOOGLE_SHEET_CSV_URL", "")
@@ -40,7 +45,6 @@ def parse_csv_stream(csv_text):
     fieldnames = reader.fieldnames or []
     records = []
     for row in reader:
-        # Standardize ticket ID key if needed
         records.append(dict(row))
     return records
 
@@ -49,7 +53,7 @@ def load_data():
     global tickets_cache, tickets_by_id
     records = []
 
-    # 1. Attempt remote fetch if Google Sheet URL is set
+    # 1. Remote fetch if Google Sheet URL is set in code
     if GOOGLE_SHEET_CSV_URL and GOOGLE_SHEET_CSV_URL.strip().startswith("http"):
         try:
             import requests
@@ -69,90 +73,9 @@ def load_data():
         except Exception as e:
             print(f"[ERROR] Could not load local CSV: {e}")
 
-    # Populate cache structures
     tickets_cache = records
-    tickets_by_id = {row.get("ID Tiket", "").strip(): row for row in tickets_cache if row.get("ID Tiket")}
+    tickets_by_id = {row.get("ID Tiket", "").strip().lower(): row for row in tickets_cache if row.get("ID Tiket")}
     return tickets_cache
-
-# Initial load
-load_data()
-
-@app.route("/")
-def index():
-    """Serves the single page application index."""
-    if os.path.exists(os.path.join(app.static_folder, "index.html")):
-        return send_from_directory(app.static_folder, "index.html")
-    return jsonify({
-        "message": "Pasar Malam 2026 Gate Scanner API running.",
-        "endpoints": ["/api/tickets", "/api/checkin", "/api/export", "/api/sync"]
-    })
-
-@app.route("/<path:path>")
-def static_proxy(path):
-    """Serves static frontend assets."""
-    if os.path.exists(os.path.join(app.static_folder, path)):
-        return send_from_directory(app.static_folder, path)
-    return send_from_directory(app.static_folder, "index.html")
-
-@app.route("/api/tickets", methods=["GET"])
-def get_tickets():
-    """Returns all ticket records."""
-    if not tickets_cache:
-        load_data()
-    return jsonify(tickets_cache)
-
-@app.route("/api/checkin", methods=["POST"])
-def checkin():
-    """Validates and performs ticket check-in."""
-    data = request.get_json(force=True, silent=True) or {}
-    id_tiket = data.get("id_tiket", "").strip()
-
-    if not id_tiket:
-        return jsonify({"success": False, "error": "ID Tiket is required."}), 400
-
-    ticket = tickets_by_id.get(id_tiket)
-    if not ticket:
-        # Case-insensitive search fallback
-        for key, item in tickets_by_id.items():
-            if key.lower() == id_tiket.lower():
-                ticket = item
-                break
-
-    if not ticket:
-        return jsonify({
-            "success": False,
-            "status": "NOT_FOUND",
-            "error": f"Ticket '{id_tiket}' was not found in the registry."
-        }), 404
-
-    current_status = ticket.get("Status Tiket", "").strip()
-    is_used = ticket.get("Terpakai", "").strip().lower() == "terpakai" or current_status.lower() == "terpakai"
-
-    if is_used:
-        return jsonify({
-            "success": False,
-            "status": "ALREADY_USED",
-            "message": "Ticket has already been used.",
-            "ticket": ticket,
-            "checked_in_at": ticket.get("Waktu Kedatangan", "")
-        }), 409
-
-    # Check in: Record current time (HH:MM:SS format)
-    now_str = datetime.now().strftime("%H:%M:%S")
-    ticket["Status Tiket"] = "Terpakai"
-    ticket["Terpakai"] = "Terpakai"
-    ticket["Waktu Kedatangan"] = now_str
-
-    # Persist in local file if available
-    save_local_tickets()
-
-    return jsonify({
-        "success": True,
-        "status": "SUCCESS",
-        "message": f"Successfully checked in {ticket.get('Nama', 'Attendee')}.",
-        "ticket": ticket,
-        "checked_in_at": now_str
-    })
 
 def save_local_tickets():
     """Writes updated dataset back to local CSV."""
@@ -166,39 +89,225 @@ def save_local_tickets():
     except Exception as e:
         print(f"[SAVE ERROR] Could not persist local CSV: {e}")
 
-@app.route("/api/export", methods=["GET"])
-def export_csv():
-    """Generates and downloads the current checked-in dataset as an updated CSV."""
+def get_next_ticket_number():
+    max_num = 161
+    for t in tickets_cache:
+        raw_id = t.get("ID Tiket", "")
+        if "PM2026-" in raw_id:
+            try:
+                num = int(raw_id.split("PM2026-")[-1])
+                if num > max_num:
+                    max_num = num
+            except ValueError:
+                pass
+    return max_num + 1
+
+load_data()
+
+@app.route("/")
+def index():
+    if os.path.exists(os.path.join(app.static_folder, "index.html")):
+        return send_from_directory(app.static_folder, "index.html")
+    return jsonify({
+        "message": "Pasar Malam 2026 Gate Scanner API running.",
+        "endpoints": ["/api/tickets", "/api/checkin", "/api/checkin-batch", "/api/attendees/add", "/api/export"]
+    })
+
+@app.route("/<path:path>")
+def static_proxy(path):
+    if os.path.exists(os.path.join(app.static_folder, path)):
+        return send_from_directory(app.static_folder, path)
+    return send_from_directory(app.static_folder, "index.html")
+
+@app.route("/api/tickets", methods=["GET"])
+def get_tickets():
     if not tickets_cache:
         load_data()
-    
+    return jsonify({
+        "tickets": tickets_cache,
+        "total": len(tickets_cache),
+        "syncSource": "Google Sheet Live Sync" if GOOGLE_SHEET_CSV_URL else "Local Master Manifest",
+        "lastUpdated": datetime.now().isoformat()
+    })
+
+@app.route("/api/checkin", methods=["POST"])
+def checkin():
+    data = request.get_json(force=True, silent=True) or {}
+    id_tiket = data.get("id_tiket", "").strip()
+
+    if not id_tiket:
+        return jsonify({"success": False, "error": "ID Tiket is required."}), 400
+
+    ticket = tickets_by_id.get(id_tiket.lower())
+    if not ticket:
+        return jsonify({
+            "success": False,
+            "status": "NOT_FOUND",
+            "error": f"Ticket '{id_tiket}' was not found in registry."
+        }), 404
+
+    current_status = ticket.get("Status Tiket", "").strip().lower()
+    is_used = ticket.get("Terpakai", "").strip().lower() == "terpakai" or current_status == "terpakai"
+
+    if is_used:
+        return jsonify({
+            "success": False,
+            "status": "ALREADY_USED",
+            "message": "Ticket has already been used.",
+            "ticket": ticket,
+            "checked_in_at": ticket.get("Waktu Kedatangan", "")
+        }), 409
+
+    now_str = datetime.now().strftime("%H:%M:%S")
+    ticket["Status Tiket"] = "Terpakai"
+    ticket["Terpakai"] = "Terpakai"
+    ticket["Waktu Kedatangan"] = now_str
+
+    save_local_tickets()
+
+    return jsonify({
+        "success": True,
+        "status": "SUCCESS",
+        "message": f"Successfully checked in {ticket.get('Nama', 'Attendee')}.",
+        "ticket": ticket,
+        "checked_in_at": now_str
+    })
+
+@app.route("/api/checkin-batch", methods=["POST"])
+def checkin_batch():
+    data = request.get_json(force=True, silent=True) or {}
+    id_tikets = data.get("id_tikets", [])
+    if not isinstance(id_tikets, list) or not id_tikets:
+        return jsonify({"success": False, "error": "id_tikets array required"}), 400
+
+    now_str = datetime.now().strftime("%H:%M:%S")
+    updated = []
+
+    for raw_id in id_tikets:
+        t = tickets_by_id.get(str(raw_id).strip().lower())
+        if t:
+            t["Status Tiket"] = "Terpakai"
+            t["Terpakai"] = "Terpakai"
+            if not t.get("Waktu Kedatangan"):
+                t["Waktu Kedatangan"] = now_str
+            updated.append(t)
+
+    save_local_tickets()
+    return jsonify({
+        "success": True,
+        "count": len(updated),
+        "tickets": updated,
+        "checked_in_at": now_str
+    })
+
+@app.route("/api/attendees/add", methods=["POST"])
+def add_attendee():
+    data = request.get_json(force=True, silent=True) or {}
+    nama = (data.get("nama") or "").strip()
+    kategori = (data.get("kategori") or "Non-Member").strip()
+    jumlah = max(1, int(data.get("jumlah") or 1))
+    email = (data.get("email") or "").strip()
+    no_hp = (data.get("no_hp") or "").strip()
+
+    if not nama:
+        return jsonify({"success": False, "error": "Nama is required"}), 400
+
+    now = datetime.now()
+    timestamp_str = now.strftime("%m/%d/%Y %H:%M:%S")
+    random_suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    order_id = f"ORD-WK{random_suffix}"
+
+    start_num = get_next_ticket_number()
+    created = []
+
+    for i in range(1, jumlah + 1):
+        id_tiket = f"PM2026-{str(start_num).zfill(4)}"
+        start_num += 1
+
+        rec = {
+            "Timestamp": timestamp_str,
+            "Nama": nama,
+            "Kategori": kategori,
+            "Email": email,
+            "No Hp": no_hp,
+            "Jumlah": str(jumlah),
+            "QR Code": f"https://api.qrserver.com/v1/create-qr-code/?size=400x400&data={id_tiket}",
+            "ID Tiket": id_tiket,
+            "Counter": str(i),
+            "Nama Kapital": nama.upper(),
+            "Terpakai": "Belum",
+            "Status Pembayaran": "Lunas",
+            "Order ID": order_id,
+            "Status Pengiriman WA": "ON-SITE",
+            "Merged Doc ID - Generate dan Kirim Tiket": "",
+            "Merged Doc URL - Generate dan Kirim Tiket": "",
+            "Link to merged Doc - Generate dan Kirim Tiket": f"Tiket Pasar Malam 2026 - {nama}",
+            "Document Merge Status - Generate dan Kirim Tiket": "On-Site Registration",
+            "Status Tiket": "Tersedia",
+            "Waktu Kedatangan": ""
+        }
+        tickets_cache.append(rec)
+        tickets_by_id[id_tiket.lower()] = rec
+        created.append(rec)
+
+    save_local_tickets()
+    return jsonify({
+        "success": True,
+        "message": f"Registered {jumlah} tickets for {nama}.",
+        "orderId": order_id,
+        "tickets": created
+    })
+
+@app.route("/api/attendees/update-ticket-id", methods=["POST"])
+def update_ticket_id():
+    data = request.get_json(force=True, silent=True) or {}
+    updates = data.get("updates", [])
+    mark_as_checked_in = bool(data.get("mark_as_checked_in", False))
+
+    now_str = datetime.now().strftime("%H:%M:%S")
+    modified = []
+
+    for item in updates:
+        old_id = str(item.get("old_id", "")).strip().lower()
+        new_id = str(item.get("new_id", "")).strip()
+        if not old_id or not new_id:
+            continue
+
+        t = tickets_by_id.get(old_id)
+        if t:
+            # remove old map key
+            del tickets_by_id[old_id]
+            t["ID Tiket"] = new_id
+            t["QR Code"] = f"https://api.qrserver.com/v1/create-qr-code/?size=400x400&data={new_id}"
+            if mark_as_checked_in:
+                t["Status Tiket"] = "Terpakai"
+                t["Terpakai"] = "Terpakai"
+                t["Waktu Kedatangan"] = now_str
+            tickets_by_id[new_id.lower()] = t
+            modified.append(t)
+
+    save_local_tickets()
+    return jsonify({"success": True, "tickets": modified})
+
+@app.route("/api/export", methods=["GET"])
+def export_csv():
+    if not tickets_cache:
+        load_data()
     output = io.StringIO()
     headers = fieldnames if fieldnames else list(tickets_cache[0].keys())
     writer = csv.DictWriter(output, fieldnames=headers)
     writer.writeheader()
     writer.writerows(tickets_cache)
-    
     mem = io.BytesIO()
     mem.write(output.getvalue().encode("utf-8"))
     mem.seek(0)
-    
     filename = f"PasarMalam2026_Checkin_Export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    return send_file(
-        mem,
-        mimetype="text/csv",
-        as_attachment=True,
-        download_name=filename
-    )
+    return send_file(mem, mimetype="text/csv", as_attachment=True, download_name=filename)
 
 @app.route("/api/sync", methods=["POST"])
 def force_sync():
-    """Forces re-fetch from Google Sheet or reloads local CSV."""
     data = load_data()
-    return jsonify({
-        "success": True,
-        "count": len(data),
-        "source": "Google Sheet" if GOOGLE_SHEET_CSV_URL else "Local CSV"
-    })
+    return jsonify({"success": True, "count": len(data), "source": "Google Sheet" if GOOGLE_SHEET_CSV_URL else "Local CSV"})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))

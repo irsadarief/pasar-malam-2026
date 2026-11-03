@@ -1,10 +1,17 @@
 @import "tailwindcss";
 
-@custom-variant dark (&:where(.dark, .dark *));
-
 @layer base {
   :root {
-    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-family: 'Open Sauce Sans', 'Open Sauce One', 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    --canvas-bg: #f8f8ec;
+    --brand-red: #85362f;
+    --brand-teal: #177f6b;
+    --brand-yellow: #fcc844;
+  }
+
+  body {
+    background-color: #f8f8ec;
+    color: #1c1917;
   }
 
   code, pre, .font-mono {
@@ -12,7 +19,7 @@
   }
 }
 
-/* Reticle scan line animation */
+/* Scanner laser sweep animation */
 @keyframes scannerLaser {
   0% {
     top: 6%;
@@ -29,21 +36,21 @@
 }
 
 .animate-scan-laser {
-  animation: scannerLaser 2.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  animation: scannerLaser 2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 
-/* Custom scrollbars for data tables and attendees list */
+/* Custom scrollbars matching warm parchment aesthetic */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: rgba(15, 23, 42, 0.6);
+  background: rgba(230, 228, 213, 0.6);
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.25);
+  background: rgba(133, 54, 47, 0.3);
   border-radius: 9999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.45);
+  background: rgba(133, 54, 47, 0.5);
 }

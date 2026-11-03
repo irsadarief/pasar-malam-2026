@@ -18,8 +18,9 @@ app.use(express.json());
 const LOCAL_CSV_PATH = path.resolve(__dirname, 'All_Ticket_011126.csv');
 const PUBLIC_CSV_PATH = path.resolve(__dirname, 'public', 'All_Ticket_011126.csv');
 
-// Dynamic Google Sheet CSV URL (can also be updated at runtime via settings modal)
-let GOOGLE_SHEET_CSV_URL = process.env.GOOGLE_SHEET_CSV_URL || '';
+// Configurable Google Sheet CSV URL (configured ONLY via code / environment variable)
+// e.g.: "https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID>/gviz/tq?tqx=out:csv&sheet=All%20Tickets"
+const GOOGLE_SHEET_CSV_URL = process.env.GOOGLE_SHEET_CSV_URL || '';
 
 export interface TicketRecord {
   'Timestamp'?: string;
@@ -134,7 +135,7 @@ function recordsToCSV(records: TicketRecord[], headers: string[]): string {
 async function loadTicketsData(forceRemote = false): Promise<TicketRecord[]> {
   let loadedFromRemote = false;
 
-  // 1. Try Google Sheet if configured
+  // 1. Try Google Sheet if configured in code
   if (GOOGLE_SHEET_CSV_URL && GOOGLE_SHEET_CSV_URL.startsWith('http')) {
     try {
       const response = await fetch(GOOGLE_SHEET_CSV_URL, { signal: AbortSignal.timeout(8000) });
@@ -190,6 +191,22 @@ function saveTicketsToDisk() {
   }
 }
 
+// Helper: Calculate next PM2026-XXXX sequence number
+function getNextTicketIdNumber(): number {
+  let maxNum = 161; // base count from manifest
+  for (const t of ticketsCache) {
+    const id = t['ID Tiket'] || '';
+    const match = id.match(/PM2026-(\d+)/i);
+    if (match) {
+      const num = parseInt(match[1], 10);
+      if (!isNaN(num) && num > maxNum) {
+        maxNum = num;
+      }
+    }
+  }
+  return maxNum + 1;
+}
+
 // Initial dataset load
 loadTicketsData();
 
@@ -205,13 +222,12 @@ app.get('/api/tickets', async (_req: Request, res: Response) => {
   res.json({
     tickets: ticketsCache,
     total: ticketsCache.length,
-    syncSource: GOOGLE_SHEET_CSV_URL ? 'Google Sheet Live Sync' : 'Local Master File',
-    googleSheetUrl: GOOGLE_SHEET_CSV_URL,
+    syncSource: GOOGLE_SHEET_CSV_URL ? 'Google Sheet Live Sync' : 'Local Master Manifest',
     lastUpdated: new Date().toISOString()
   });
 });
 
-// POST /api/checkin: Validates ticket status and records check-in
+// POST /api/checkin: Validates ticket status and records check-in for a single ticket
 app.post('/api/checkin', (req: Request, res: Response) => {
   const { id_tiket } = req.body || {};
   if (!id_tiket || typeof id_tiket !== 'string') {
@@ -268,6 +284,149 @@ app.post('/api/checkin', (req: Request, res: Response) => {
   });
 });
 
+// POST /api/checkin-batch: Checks in multiple tickets with the same identity
+app.post('/api/checkin-batch', (req: Request, res: Response) => {
+  const { id_tikets } = req.body || {};
+  if (!Array.isArray(id_tikets) || id_tikets.length === 0) {
+    res.status(400).json({ success: false, error: 'id_tikets array is required.' });
+    return;
+  }
+
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString('id-ID', { hour12: false });
+  const updatedTickets: TicketRecord[] = [];
+
+  for (const rawId of id_tikets) {
+    const cleanId = String(rawId).trim().toLowerCase();
+    const ticket = ticketsCache.find(
+      t => (t['ID Tiket'] || '').toLowerCase() === cleanId
+    );
+    if (ticket) {
+      ticket['Status Tiket'] = 'Terpakai';
+      ticket['Terpakai'] = 'Terpakai';
+      if (!ticket['Waktu Kedatangan']) {
+        ticket['Waktu Kedatangan'] = timeStr;
+      }
+      updatedTickets.push(ticket);
+    }
+  }
+
+  saveTicketsToDisk();
+
+  res.json({
+    success: true,
+    count: updatedTickets.length,
+    tickets: updatedTickets,
+    checked_in_at: timeStr
+  });
+});
+
+// POST /api/attendees/add: Register new attendant (Name, Category, How many)
+app.post('/api/attendees/add', (req: Request, res: Response) => {
+  const { nama, kategori, jumlah, no_hp, email } = req.body || {};
+
+  if (!nama || typeof nama !== 'string' || !nama.trim()) {
+    res.status(400).json({ success: false, error: 'Attendee Name is required.' });
+    return;
+  }
+
+  const count = Math.max(1, parseInt(jumlah || '1', 10));
+  const categoryClean = (kategori || 'Non-Member').trim();
+  const namaClean = nama.trim();
+  const namaKapital = namaClean.toUpperCase();
+  const now = new Date();
+  const timestampStr = `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear()} ${now.toLocaleTimeString('en-US', { hour12: false })}`;
+  
+  // Generate random order suffix e.g. ORD-W123
+  const orderId = `ORD-WK${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+  let startNum = getNextTicketIdNumber();
+  const newTickets: TicketRecord[] = [];
+
+  for (let i = 1; i <= count; i++) {
+    const idTiket = `PM2026-${String(startNum).padStart(4, '0')}`;
+    startNum++;
+
+    const ticket: TicketRecord = {
+      Timestamp: timestampStr,
+      Nama: namaClean,
+      Kategori: categoryClean,
+      Email: email ? String(email).trim() : '',
+      'No Hp': no_hp ? String(no_hp).trim() : '',
+      Jumlah: String(count),
+      'QR Code': `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${idTiket}`,
+      'ID Tiket': idTiket,
+      Counter: String(i),
+      'Nama Kapital': namaKapital,
+      Terpakai: 'Belum',
+      'Status Pembayaran': 'Lunas',
+      'Order ID': orderId,
+      'Status Pengiriman WA': 'ON-SITE',
+      'Merged Doc ID - Generate dan Kirim Tiket': '',
+      'Merged Doc URL - Generate dan Kirim Tiket': '',
+      'Link to merged Doc - Generate dan Kirim Tiket': `Tiket Pasar Malam 2026 - ${namaClean}`,
+      'Document Merge Status - Generate dan Kirim Tiket': 'On-Site Gate Registration',
+      'Status Tiket': 'Tersedia',
+      'Waktu Kedatangan': ''
+    };
+
+    ticketsCache.push(ticket);
+    newTickets.push(ticket);
+  }
+
+  saveTicketsToDisk();
+
+  res.json({
+    success: true,
+    message: `Registered ${count} ticket(s) for ${namaClean}.`,
+    orderId,
+    tickets: newTickets
+  });
+});
+
+// POST /api/attendees/update-ticket-id: Operator updates assigned ticket number(s)
+app.post('/api/attendees/update-ticket-id', (req: Request, res: Response) => {
+  const { updates, mark_as_checked_in } = req.body || {};
+  // updates is array of { old_id: string, new_id: string }
+  if (!Array.isArray(updates) || updates.length === 0) {
+    res.status(400).json({ success: false, error: 'Updates array required.' });
+    return;
+  }
+
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString('id-ID', { hour12: false });
+  const modified: TicketRecord[] = [];
+
+  for (const item of updates) {
+    const oldId = String(item.old_id || '').trim().toLowerCase();
+    const newId = String(item.new_id || '').trim();
+
+    if (!oldId || !newId) continue;
+
+    const ticket = ticketsCache.find(
+      t => (t['ID Tiket'] || '').toLowerCase() === oldId
+    );
+
+    if (ticket) {
+      ticket['ID Tiket'] = newId;
+      ticket['QR Code'] = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${newId}`;
+      if (mark_as_checked_in) {
+        ticket['Status Tiket'] = 'Terpakai';
+        ticket['Terpakai'] = 'Terpakai';
+        ticket['Waktu Kedatangan'] = timeStr;
+      }
+      modified.push(ticket);
+    }
+  }
+
+  saveTicketsToDisk();
+
+  res.json({
+    success: true,
+    message: `Updated ${modified.length} ticket number(s).`,
+    tickets: modified
+  });
+});
+
 // POST /api/manual-toggle: Gate staff manual override
 app.post('/api/manual-toggle', (req: Request, res: Response) => {
   const { id_tiket, target_status } = req.body || {};
@@ -315,24 +474,18 @@ app.get('/api/export', (_req: Request, res: Response) => {
   res.send(csvOutput);
 });
 
-// POST /api/sync: Force sync from remote or reload local CSV
-app.post('/api/sync', async (req: Request, res: Response) => {
-  const newUrl = req.body?.googleSheetUrl;
-  if (typeof newUrl === 'string') {
-    GOOGLE_SHEET_CSV_URL = newUrl.trim();
-  }
+// POST /api/sync: Reloads / syncs from Google Sheet if configured in code or local disk
+app.post('/api/sync', async (_req: Request, res: Response) => {
   const loaded = await loadTicketsData(true);
   res.json({
     success: true,
     total: loaded.length,
-    syncSource: GOOGLE_SHEET_CSV_URL ? 'Google Sheet Live Sync' : 'Local Master File',
-    googleSheetUrl: GOOGLE_SHEET_CSV_URL
+    syncSource: GOOGLE_SHEET_CSV_URL ? 'Google Sheet Live Sync' : 'Local Master Manifest'
   });
 });
 
 // POST /api/reset-demo: Reset all tickets back to original state for testing
 app.post('/api/reset-demo', (_req: Request, res: Response) => {
-  // Reload from original attachment
   const originalPath = path.resolve(__dirname, 'public', 'assets', 'aistudio', 'All_Ticket_011126_bdc9b2ac');
   if (fs.existsSync(originalPath)) {
     const content = fs.readFileSync(originalPath, 'utf-8');

@@ -4,18 +4,21 @@ import {
   Camera,
   CheckCircle2,
   ListFilter,
+  Monitor,
+  Plus,
   RefreshCw,
   Search,
+  Smartphone,
   Sparkles,
   Ticket as TicketIcon,
-  Volume2,
-  VolumeX,
+  Users,
 } from 'lucide-react';
 import { Header } from './components/Header';
 import { Scanner } from './components/Scanner';
 import { TicketCard } from './components/TicketCard';
 import { AttendeeList } from './components/AttendeeList';
-import { SyncSettingsModal } from './components/SyncSettingsModal';
+import { AddAttendeeModal } from './components/AddAttendeeModal';
+import { GroupCheckinModal } from './components/GroupCheckinModal';
 import { GateMetrics, ScanResult, Ticket } from './types';
 import { playErrorTone, playSuccessBeep, playWarningTone } from './utils/audio';
 
@@ -26,12 +29,25 @@ export default function App() {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
-  const [syncSource, setSyncSource] = useState<string>('Local Master File');
-  const [googleSheetUrl, setGoogleSheetUrl] = useState<string>('');
+  const [syncSource, setSyncSource] = useState<string>('Local Master Manifest');
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [autoCheckIn, setAutoCheckIn] = useState<boolean>(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
-  const [mobileTab, setMobileTab] = useState<'scanner' | 'attendees'>('scanner');
+
+  // Interface mode: 'mobile' (scanner-focused) or 'desktop' (attendee log & manifest console)
+  const [interfaceMode, setInterfaceMode] = useState<'mobile' | 'desktop'>(() => {
+    if (typeof window !== 'undefined') {
+      return window.innerWidth < 1024 ? 'mobile' : 'desktop';
+    }
+    return 'mobile';
+  });
+
+  // Add Attendee Modal State
+  const [isAddAttendeeOpen, setIsAddAttendeeOpen] = useState<boolean>(false);
+
+  // Group Check-In Modal State
+  const [isGroupModalOpen, setIsGroupModalOpen] = useState<boolean>(false);
+  const [groupScannedTicket, setGroupScannedTicket] = useState<Ticket | null>(null);
+  const [groupRelatedTickets, setGroupRelatedTickets] = useState<Ticket[]>([]);
 
   // Fetch tickets manifest from backend API
   const fetchTickets = useCallback(async () => {
@@ -41,11 +57,8 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setTickets(data.tickets || []);
-        setSyncSource(data.syncSource || 'Local Master File');
-        if (data.googleSheetUrl !== undefined) {
-          setGoogleSheetUrl(data.googleSheetUrl);
-        }
-        // If an attendee was selected, refresh their record
+        setSyncSource(data.syncSource || 'Local Master Manifest');
+        // Refresh currently active selected ticket
         setSelectedTicket(prev => {
           if (!prev) return null;
           const fresh = (data.tickets || []).find(
@@ -106,8 +119,31 @@ export default function App() {
     };
   }, [tickets]);
 
-  // Perform Check In POST request
-  const handleCheckIn = async (idTiket: string) => {
+  // Helper: Find all tickets belonging to the same person / identity
+  const findRelatedTickets = useCallback((targetTicket: Ticket): Ticket[] => {
+    const targetName = (targetTicket.Nama || targetTicket['Nama Kapital'] || '').trim().toLowerCase();
+    const targetOrderId = (targetTicket['Order ID'] || '').trim().toLowerCase();
+    const targetPhone = (targetTicket['No Hp'] || '').trim();
+    const targetEmail = (targetTicket.Email || '').trim().toLowerCase();
+
+    return tickets.filter(t => {
+      const name = (t.Nama || t['Nama Kapital'] || '').trim().toLowerCase();
+      const orderId = (t['Order ID'] || '').trim().toLowerCase();
+      const phone = (t['No Hp'] || '').trim();
+      const email = (t.Email || '').trim().toLowerCase();
+
+      // Check matches
+      const matchOrderId = targetOrderId && orderId && targetOrderId === orderId;
+      const matchName = targetName && name && targetName === name;
+      const matchPhone = targetPhone.length >= 6 && phone.length >= 6 && targetPhone === phone;
+      const matchEmail = targetEmail.includes('@') && email.includes('@') && targetEmail === email;
+
+      return matchOrderId || matchName || matchPhone || matchEmail;
+    });
+  }, [tickets]);
+
+  // Check In a Single Ticket
+  const handleCheckInSingle = async (idTiket: string) => {
     if (!idTiket) return;
     setIsProcessing(true);
 
@@ -124,17 +160,14 @@ export default function App() {
       if (res.ok && data.success) {
         if (soundEnabled) playSuccessBeep();
 
-        // Trigger confetti celebration
         try {
           confetti({
             particleCount: 75,
             spread: 60,
             origin: { y: 0.7 },
-            colors: ['#10b981', '#f59e0b', '#3b82f6'],
+            colors: ['#177f6b', '#fcc844', '#85362f'],
           });
-        } catch {
-          // Ignore if canvas-confetti is not loaded
-        }
+        } catch {}
 
         setSelectedTicket(data.ticket);
         setScanResult({
@@ -146,7 +179,6 @@ export default function App() {
           checkedInAt: data.checked_in_at,
         });
 
-        // Update in local state array immediately
         setTickets(prev =>
           prev.map(t =>
             (t['ID Tiket'] || '').toLowerCase() === idTiket.toLowerCase() ? data.ticket : t
@@ -182,14 +214,76 @@ export default function App() {
       });
     } finally {
       setIsProcessing(false);
+      setIsGroupModalOpen(false);
     }
   };
 
-  // Handle scanned QR code string (either full URL or raw ID)
+  // Batch Check In All Tickets in a Group (Accelerated Check-in)
+  const handleCheckInBatch = async (groupTickets: Ticket[]) => {
+    if (!groupTickets || groupTickets.length === 0) return;
+    setIsProcessing(true);
+
+    try {
+      const idTikets = groupTickets.map(t => t['ID Tiket']);
+      const res = await fetch('/api/checkin-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id_tikets: idTikets }),
+      });
+
+      const data = await res.json();
+      const timeStr = new Date().toLocaleTimeString('id-ID', { hour12: false });
+
+      if (res.ok && data.success) {
+        if (soundEnabled) playSuccessBeep();
+
+        try {
+          confetti({
+            particleCount: 120,
+            spread: 80,
+            origin: { y: 0.6 },
+            colors: ['#177f6b', '#fcc844', '#85362f'],
+          });
+        } catch {}
+
+        const updatedMap = new Map<string, Ticket>();
+        for (const t of data.tickets || []) {
+          updatedMap.set((t['ID Tiket'] || '').toLowerCase(), t);
+        }
+
+        setTickets(prev =>
+          prev.map(t => {
+            const key = (t['ID Tiket'] || '').toLowerCase();
+            return updatedMap.has(key) ? updatedMap.get(key)! : t;
+          })
+        );
+
+        const primaryTicket = groupTickets[0];
+        setSelectedTicket(updatedMap.get((primaryTicket['ID Tiket'] || '').toLowerCase()) || primaryTicket);
+
+        setScanResult({
+          status: 'SUCCESS',
+          ticket: primaryTicket,
+          message: `Checked in all ${data.count} tickets for ${primaryTicket.Nama || 'Attendee Group'}.`,
+          scannedCode: primaryTicket['ID Tiket'],
+          timestamp: timeStr,
+          checkedInAt: data.checked_in_at,
+        });
+      }
+    } catch (err: any) {
+      if (soundEnabled) playErrorTone();
+      console.error('Batch checkin error:', err);
+    } finally {
+      setIsProcessing(false);
+      setIsGroupModalOpen(false);
+    }
+  };
+
+  // Handle scanned QR code string
   const handleScan = (scannedRaw: string) => {
     let cleanCode = scannedRaw.trim();
 
-    // If QR contains full qrserver link or URL, extract data parameter
+    // Extract data param if it was a full QR URL
     if (cleanCode.includes('data=')) {
       try {
         const url = new URL(cleanCode);
@@ -201,7 +295,6 @@ export default function App() {
       }
     }
 
-    // Find ticket in local registry
     const foundTicket = tickets.find(
       t => (t['ID Tiket'] || '').toLowerCase() === cleanCode.toLowerCase()
     );
@@ -219,10 +312,10 @@ export default function App() {
       return;
     }
 
+    setSelectedTicket(foundTicket);
+
     const isUsed = (foundTicket['Status Tiket'] || '').toLowerCase() === 'terpakai' ||
                    (foundTicket['Terpakai'] || '').toLowerCase() === 'terpakai';
-
-    setSelectedTicket(foundTicket);
 
     if (isUsed) {
       if (soundEnabled) playWarningTone();
@@ -234,20 +327,37 @@ export default function App() {
         timestamp: timeStr,
         checkedInAt: foundTicket['Waktu Kedatangan'] || 'Previously checked in',
       });
+      return;
+    }
+
+    // Check if same identity (Name, Order ID, Phone, Email) has multiple tickets in total!
+    const related = findRelatedTickets(foundTicket);
+    const uncheckInRelated = related.filter(t => {
+      const s = (t['Status Tiket'] || '').toLowerCase();
+      const p = (t['Terpakai'] || '').toLowerCase();
+      return s !== 'terpakai' && p !== 'terpakai';
+    });
+
+    if (related.length > 1 && uncheckInRelated.length > 1) {
+      if (soundEnabled) playSuccessBeep();
+      setGroupScannedTicket(foundTicket);
+      setGroupRelatedTickets(related);
+      setIsGroupModalOpen(true);
+      return;
+    }
+
+    // Single ticket or remaining 1 ticket in order
+    if (autoCheckIn) {
+      handleCheckInSingle(foundTicket['ID Tiket']);
     } else {
-      // If Auto Check-In mode is ON, immediately execute check-in!
-      if (autoCheckIn) {
-        handleCheckIn(foundTicket['ID Tiket']);
-      } else {
-        if (soundEnabled) playSuccessBeep();
-        setScanResult({
-          status: 'SUCCESS',
-          ticket: foundTicket,
-          message: `Ticket valid! Ready to check in ${foundTicket.Nama || foundTicket['Nama Kapital']}.`,
-          scannedCode: cleanCode,
-          timestamp: timeStr,
-        });
-      }
+      if (soundEnabled) playSuccessBeep();
+      setScanResult({
+        status: 'SUCCESS',
+        ticket: foundTicket,
+        message: `Ticket valid! Ready to check in ${foundTicket.Nama || foundTicket['Nama Kapital']}.`,
+        scannedCode: cleanCode,
+        timestamp: timeStr,
+      });
     }
   };
 
@@ -275,202 +385,242 @@ export default function App() {
     }
   };
 
-  // Keyboard shortcut listener (Press Enter to check in active ticket)
+  // Keyboard shortcut listener: Press Enter to check in active ticket
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Enter' && selectedTicket) {
+      if (e.key === 'Enter' && selectedTicket && !isGroupModalOpen && !isAddAttendeeOpen) {
         const isUsed = (selectedTicket['Status Tiket'] || '').toLowerCase() === 'terpakai' ||
                        (selectedTicket['Terpakai'] || '').toLowerCase() === 'terpakai';
         if (!isUsed && !isProcessing) {
-          handleCheckIn(selectedTicket['ID Tiket']);
+          handleCheckInSingle(selectedTicket['ID Tiket']);
         }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedTicket, isProcessing]);
+  }, [selectedTicket, isProcessing, isGroupModalOpen, isAddAttendeeOpen]);
 
   // Export CSV handler
   const handleExportCSV = () => {
     window.location.href = '/api/export';
   };
 
-  // Save Google Sheet URL and trigger sync
-  const handleSaveGoogleSheetUrl = async (url: string) => {
-    const res = await fetch('/api/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ googleSheetUrl: url }),
-    });
-    if (!res.ok) throw new Error('Failed to sync from Google Sheet');
-    await fetchTickets();
-  };
-
-  // Reset demo manifest handler
-  const handleResetManifest = async () => {
-    const res = await fetch('/api/reset-demo', { method: 'POST' });
-    if (res.ok) {
-      await fetchTickets();
-      setSelectedTicket(null);
-      setScanResult(null);
-    }
-  };
-
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans pb-16 lg:pb-8 selection:bg-amber-500 selection:text-black">
-      {/* Top Header & Metrics Dashboard */}
+    <div className="min-h-screen bg-[#f8f8ec] text-stone-900 flex flex-col font-sans selection:bg-[#fcc844] selection:text-stone-900">
+      {/* Minimized Single-Row Top Toolbar */}
       <Header
         metrics={metrics}
         soundEnabled={soundEnabled}
         onToggleSound={() => setSoundEnabled(v => !v)}
         syncSource={syncSource}
-        onOpenSyncModal={() => setIsSettingsOpen(true)}
         onExportCSV={handleExportCSV}
         isSyncing={isSyncing}
         onSyncNow={fetchTickets}
+        onOpenAddAttendee={() => setIsAddAttendeeOpen(true)}
+        interfaceMode={interfaceMode}
+        onToggleInterfaceMode={(mode) => setInterfaceMode(mode)}
       />
 
-      {/* Main Responsive Layout */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-5">
+      {/* Main Content Viewport */}
+      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5">
         {isLoading ? (
           <div className="py-24 flex flex-col items-center justify-center gap-3">
-            <div className="w-10 h-10 border-4 border-amber-500 border-t-transparent rounded-full animate-spin" />
-            <p className="text-sm text-slate-400 font-medium">Loading Pasar Malam 2026 Ticket Manifest...</p>
+            <div className="w-10 h-10 border-4 border-[#85362f] border-t-transparent rounded-full animate-spin" />
+            <p className="text-xs sm:text-sm text-stone-600 font-bold">
+              Loading Pasar Malam 2026 Ticket Manifest...
+            </p>
+          </div>
+        ) : interfaceMode === 'mobile' ? (
+          /* ================================================================= */
+          /* MOBILE INTERFACE: Focused on Camera Scanner, Rapid Validation     */
+          /* ================================================================= */
+          <div className="max-w-md mx-auto flex flex-col gap-4 pb-8">
+            {/* Live Camera Scanner */}
+            <Scanner
+              onScan={handleScan}
+              allTickets={tickets}
+              scanResult={scanResult}
+              autoCheckIn={autoCheckIn}
+              onToggleAutoCheckIn={() => setAutoCheckIn(v => !v)}
+              isProcessing={isProcessing}
+            />
+
+            {/* Validation Card for Currently Scanned / Selected Attendee */}
+            {selectedTicket && (
+              <div className="pt-1">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-bold text-[#85362f] flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-[#fcc844]" />
+                    Validation Card
+                  </span>
+                  <button
+                    onClick={() => setSelectedTicket(null)}
+                    className="text-xs text-stone-500 hover:text-stone-900 font-semibold"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+                <TicketCard
+                  ticket={selectedTicket}
+                  onCheckIn={handleCheckInSingle}
+                  onManualToggle={handleManualToggle}
+                  isCheckingIn={isProcessing}
+                />
+              </div>
+            )}
+
+            {/* Quick Switch Button to Attendee Log */}
+            <div className="pt-2 text-center">
+              <button
+                onClick={() => setInterfaceMode('desktop')}
+                className="text-xs text-stone-600 hover:text-[#85362f] font-bold transition-colors flex items-center justify-center gap-1.5 mx-auto py-2"
+              >
+                <Monitor className="w-3.5 h-3.5" />
+                <span>Switch to Desktop Attendee Console</span>
+              </button>
+            </div>
           </div>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-            {/* Left Column: Live Scanner & Search (Mobile visible when mobileTab === 'scanner') */}
-            <div className={`lg:col-span-5 flex flex-col gap-5 ${mobileTab === 'scanner' ? 'block' : 'hidden lg:flex'}`}>
-              <Scanner
-                onScan={handleScan}
-                allTickets={tickets}
-                scanResult={scanResult}
-                autoCheckIn={autoCheckIn}
-                onToggleAutoCheckIn={() => setAutoCheckIn(v => !v)}
-                isProcessing={isProcessing}
-              />
-
-              {/* On Mobile: If a ticket is selected, show ticket card right below scanner */}
-              {selectedTicket && (
-                <div className="lg:hidden">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-semibold text-slate-300">Active Scanned Ticket</span>
-                    <button
-                      onClick={() => setSelectedTicket(null)}
-                      className="text-xs text-slate-400 hover:text-white"
-                    >
-                      Dismiss
-                    </button>
+          /* ================================================================= */
+          /* DESKTOP INTERFACE: Focused on Attendee Log, Search, & Operations  */
+          /* ================================================================= */
+          <div className="flex flex-col gap-5">
+            {/* Top Quick Status & Search Strip */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+              <div className="p-3 bg-white border border-[#e2e0cf] rounded-xl shadow-2xs">
+                <span className="text-[11px] text-stone-500 block font-bold">Total Registry</span>
+                <span className="text-2xl font-black text-stone-900 font-mono tabular-nums">{metrics.total}</span>
+              </div>
+              <div className="p-3 bg-white border border-[#e2e0cf] rounded-xl shadow-2xs">
+                <span className="text-[11px] text-[#177f6b] block font-bold">Checked In Attendees</span>
+                <span className="text-2xl font-black text-[#177f6b] font-mono tabular-nums">{metrics.checkedIn}</span>
+              </div>
+              <div className="p-3 bg-white border border-[#e2e0cf] rounded-xl shadow-2xs">
+                <span className="text-[11px] text-[#85362f] block font-bold">Remaining Pending</span>
+                <span className="text-2xl font-black text-[#85362f] font-mono tabular-nums">{metrics.remaining}</span>
+              </div>
+              <div className="p-3 bg-white border border-[#e2e0cf] rounded-xl shadow-2xs flex items-center justify-between">
+                <div>
+                  <span className="text-[11px] text-stone-500 block font-bold">Category Ratio</span>
+                  <div className="text-xs font-bold text-stone-800 mt-1 flex items-center gap-2">
+                    <span className="text-[#85362f]">PPI: {metrics.ppi.checkedIn}/{metrics.ppi.total}</span>
+                    <span className="text-stone-300">·</span>
+                    <span className="text-[#177f6b]">SIS: {metrics.sis.checkedIn}/{metrics.sis.total}</span>
                   </div>
-                  <TicketCard
-                    ticket={selectedTicket}
-                    onCheckIn={handleCheckIn}
-                    onManualToggle={handleManualToggle}
-                    isCheckingIn={isProcessing}
-                  />
                 </div>
-              )}
+                <button
+                  onClick={() => setIsAddAttendeeOpen(true)}
+                  className="px-3 py-2 bg-[#177f6b] hover:bg-[#136a59] text-white font-bold text-xs rounded-lg transition-colors flex items-center gap-1 shadow-xs"
+                >
+                  <Plus className="w-3.5 h-3.5 stroke-[3]" />
+                  <span>Add Walk-in</span>
+                </button>
+              </div>
             </div>
 
-            {/* Right Column: Ticket Validation Card (Desktop) & Attendee Registry */}
-            <div className={`lg:col-span-7 flex flex-col gap-5 ${mobileTab === 'attendees' ? 'block' : 'hidden lg:flex'}`}>
-              {/* Desktop Active Scanned Ticket Card */}
-              {selectedTicket ? (
-                <div className="hidden lg:block">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-                      <Sparkles className="w-4 h-4 text-amber-400" />
-                      Active Scanned Ticket Validation
-                    </span>
-                    <button
-                      onClick={() => setSelectedTicket(null)}
-                      className="text-xs text-slate-400 hover:text-white"
-                    >
-                      Dismiss Card
-                    </button>
-                  </div>
-                  <TicketCard
-                    ticket={selectedTicket}
-                    onCheckIn={handleCheckIn}
-                    onManualToggle={handleManualToggle}
-                    isCheckingIn={isProcessing}
-                  />
-                </div>
-              ) : (
-                <div className="hidden lg:flex p-6 rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 items-center justify-center text-center">
-                  <div className="space-y-1">
-                    <div className="w-10 h-10 rounded-xl bg-slate-800/80 mx-auto flex items-center justify-center text-slate-400 mb-2">
-                      <TicketIcon className="w-5 h-5 text-amber-400/80" />
+            {/* Split Grid: Left Side Inspector & Right Side Attendee Table */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+              {/* Left Column (4 cols): Quick Inspector Card or Camera Scanner */}
+              <div className="lg:col-span-4 flex flex-col gap-4">
+                {selectedTicket ? (
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-bold text-[#85362f] flex items-center gap-1.5">
+                        <Sparkles className="w-3.5 h-3.5 text-[#fcc844]" />
+                        Selected Attendee
+                      </span>
+                      <button
+                        onClick={() => setSelectedTicket(null)}
+                        className="text-xs text-stone-500 hover:text-stone-900 font-bold"
+                      >
+                        Clear
+                      </button>
                     </div>
-                    <p className="text-sm font-semibold text-slate-300">No Ticket Selected</p>
-                    <p className="text-xs text-slate-500 max-w-sm">
-                      Scan a QR code or click any attendee in the manifest below to inspect details and validate entry.
+                    <TicketCard
+                      ticket={selectedTicket}
+                      onCheckIn={handleCheckInSingle}
+                      onManualToggle={handleManualToggle}
+                      isCheckingIn={isProcessing}
+                    />
+                  </div>
+                ) : (
+                  <div className="p-5 rounded-2xl border border-dashed border-[#e2e0cf] bg-white text-center shadow-2xs">
+                    <TicketIcon className="w-8 h-8 text-stone-400 mx-auto mb-2" />
+                    <h3 className="text-sm font-bold text-stone-800">No Attendee Selected</h3>
+                    <p className="text-xs text-stone-500 mt-1">
+                      Click any row in the registry on the right to inspect or check in the attendee.
                     </p>
                   </div>
-                </div>
-              )}
+                )}
 
-              {/* Attendee Manifest List & Searchable Tabs */}
-              <AttendeeList
-                tickets={tickets}
-                onSelectTicket={(ticket) => {
-                  setSelectedTicket(ticket);
-                  if (mobileTab === 'attendees') {
-                    // Switch to scanner view to view validation card
-                    setMobileTab('scanner');
-                  }
-                }}
-                onCheckIn={handleCheckIn}
-                onManualToggle={handleManualToggle}
-              />
+                {/* Optional Mini Scanner for Desktop webcam operators */}
+                <div className="bg-white border border-[#e2e0cf] rounded-2xl p-3 shadow-2xs">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-bold text-stone-800 flex items-center gap-1">
+                      <Camera className="w-3.5 h-3.5 text-[#85362f]" />
+                      Desktop QR Scanner
+                    </span>
+                    <button
+                      onClick={() => setInterfaceMode('mobile')}
+                      className="text-[11px] text-[#85362f] font-bold hover:underline"
+                    >
+                      Full Mobile View
+                    </button>
+                  </div>
+                  <Scanner
+                    onScan={handleScan}
+                    allTickets={tickets}
+                    scanResult={scanResult}
+                    autoCheckIn={autoCheckIn}
+                    onToggleAutoCheckIn={() => setAutoCheckIn(v => !v)}
+                    isProcessing={isProcessing}
+                    compactMode
+                  />
+                </div>
+              </div>
+
+              {/* Right Column (8 cols): Full Attendee Manifest Table */}
+              <div className="lg:col-span-8">
+                <AttendeeList
+                  tickets={tickets}
+                  onSelectTicket={(ticket) => setSelectedTicket(ticket)}
+                  onCheckIn={handleCheckInSingle}
+                  onManualToggle={handleManualToggle}
+                  onOpenAddAttendee={() => setIsAddAttendeeOpen(true)}
+                />
+              </div>
             </div>
           </div>
         )}
       </main>
 
-      {/* Fixed Mobile Bottom Tab Bar (Ergonomic Thumb-Zone Navigation) */}
-      <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-slate-900/95 backdrop-blur-md border-t border-slate-800 h-14 flex items-center justify-around px-4">
+      {/* Floating Walk-in Button on Mobile */}
+      {interfaceMode === 'mobile' && (
         <button
-          onClick={() => setMobileTab('scanner')}
-          className={`flex flex-col items-center justify-center flex-1 py-1 transition-colors ${
-            mobileTab === 'scanner' ? 'text-amber-400 font-bold' : 'text-slate-400'
-          }`}
+          onClick={() => setIsAddAttendeeOpen(true)}
+          className="fixed bottom-4 right-4 z-30 px-4 py-2.5 rounded-full bg-[#177f6b] hover:bg-[#136a59] text-white font-extrabold text-xs flex items-center gap-1.5 shadow-lg shadow-[#177f6b]/25 active:scale-95 transition-all"
         >
-          <Camera className="w-5 h-5" />
-          <span className="text-[10px] mt-0.5">Gate Scanner</span>
+          <Plus className="w-4 h-4 stroke-[3]" />
+          <span>+ Add Attendee</span>
         </button>
+      )}
 
-        <button
-          onClick={() => setMobileTab('attendees')}
-          className={`flex flex-col items-center justify-center flex-1 py-1 transition-colors relative ${
-            mobileTab === 'attendees' ? 'text-amber-400 font-bold' : 'text-slate-400'
-          }`}
-        >
-          <ListFilter className="w-5 h-5" />
-          <span className="text-[10px] mt-0.5">Attendee Log</span>
-          <span className="absolute top-1.5 right-6 px-1 rounded-full text-[9px] bg-slate-800 text-slate-300 tabular-nums">
-            {metrics.total}
-          </span>
-        </button>
+      {/* Add Attendee Modal */}
+      <AddAttendeeModal
+        isOpen={isAddAttendeeOpen}
+        onClose={() => setIsAddAttendeeOpen(false)}
+        onAttendeeAdded={fetchTickets}
+      />
 
-        <button
-          onClick={() => setIsSettingsOpen(true)}
-          className="flex flex-col items-center justify-center flex-1 py-1 text-slate-400 hover:text-slate-200 transition-colors"
-        >
-          <RefreshCw className="w-5 h-5" />
-          <span className="text-[10px] mt-0.5">Sync &amp; Export</span>
-        </button>
-      </nav>
-
-      {/* Google Sheet Sync & Export Modal */}
-      <SyncSettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        googleSheetUrl={googleSheetUrl}
-        onSaveGoogleSheetUrl={handleSaveGoogleSheetUrl}
-        onExportCSV={handleExportCSV}
-        onResetManifest={handleResetManifest}
-        syncSource={syncSource}
+      {/* Group Check-In Modal (Triggered when 1 ticket of a group order is scanned) */}
+      <GroupCheckinModal
+        isOpen={isGroupModalOpen}
+        scannedTicket={groupScannedTicket}
+        relatedTickets={groupRelatedTickets}
+        onCheckInAll={handleCheckInBatch}
+        onCheckInSingle={(ticket) => handleCheckInSingle(ticket['ID Tiket'])}
+        onCancel={() => setIsGroupModalOpen(false)}
+        isProcessing={isProcessing}
       />
     </div>
   );
