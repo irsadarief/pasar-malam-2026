@@ -27,7 +27,7 @@ from flask import Flask, jsonify, request, send_file, send_from_directory
 # e.g.: "https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID>/gviz/tq?tqx=out:csv&sheet=All%20Tickets"
 # ==============================================================================
 #GOOGLE_SHEET_CSV_URL = os.environ.get("GOOGLE_SHEET_CSV_URL", "https://docs.google.com/spreadsheets/d/1MTcIOX71UHD8D24e1eYyyxIOIWvhUUUrL71S-o-VHjU/gviz/tq?tqx=out:csv&sheet=All%20Tickets")
-GOOGLE_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/19wpQ8x0ux3rUsOc4HjUi3xXW7ZldWWZntiVP_97iMJk/gviz/tq?tqx=out:csv"
+GOOGLE_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/19wpQ8x0ux3rUsOc4HjUi3xXW7ZldWWZntiVP_97iMJk/gviz/tq?tqx=out:csv&sheet=All%20Tickets"
 #LOCAL_CSV_PATH = os.path.join(os.path.dirname(__file__), "All_Ticket_011126.csv")
 STATIC_FOLDER = os.path.join(os.path.dirname(__file__), "dist")
 
