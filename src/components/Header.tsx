@@ -3,18 +3,15 @@ import {
   Download,
   Monitor,
   Plus,
-  QrCode,
   RefreshCw,
   Smartphone,
-  Volume2,
-  VolumeX,
 } from 'lucide-react';
 import { GateMetrics } from '../types';
 
 interface HeaderProps {
   metrics: GateMetrics;
-  soundEnabled: boolean;
-  onToggleSound: () => void;
+  soundEnabled?: boolean;
+  onToggleSound?: () => void;
   syncSource: string;
   onExportCSV: () => void;
   isSyncing: boolean;
@@ -26,8 +23,6 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({
   metrics,
-  soundEnabled,
-  onToggleSound,
   syncSource,
   onExportCSV,
   isSyncing,
@@ -41,8 +36,12 @@ export const Header: React.FC<HeaderProps> = ({
       <div className="max-w-7xl mx-auto px-3 sm:px-5 h-13 flex items-center justify-between gap-2 sm:gap-4">
         {/* Brand Zone */}
         <div className="flex items-center gap-2.5 shrink-0">
-          <div className="w-8 h-8 rounded-lg bg-[#85362f] flex items-center justify-center text-[#fcc844] font-black shadow-sm">
-            <QrCode className="w-4 h-4 stroke-[2.5]" />
+          <div className="h-10 flex items-center justify-center shrink-0">
+            <img
+              src="/assets/aistudio/LED_Template__1__3621e6db.png"
+              alt="Pasar Malam 2026 Logo"
+              className="h-10 w-auto object-contain drop-shadow-xs"
+            />
           </div>
           <div className="leading-tight">
             <div className="flex items-center gap-1.5">
@@ -52,6 +51,9 @@ export const Header: React.FC<HeaderProps> = ({
               <span className="text-[10px] uppercase font-bold text-[#85362f] bg-[#85362f]/10 px-1.5 py-0.2 rounded hidden xs:inline-block">
                 GATE
               </span>
+            </div>
+            <div className="text-[10px] text-stone-500 font-semibold tracking-wider uppercase hidden sm:block">
+              The Sundanese
             </div>
           </div>
         </div>
@@ -109,23 +111,6 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Plus className="w-3.5 h-3.5 stroke-[3]" />
             <span className="hidden sm:inline">Add Attendee</span>
-          </button>
-
-          {/* Audio Mute/Unmute */}
-          <button
-            onClick={onToggleSound}
-            title={soundEnabled ? 'Mute Scan Audio' : 'Unmute Scan Audio'}
-            className={`w-8 h-8 rounded-lg border flex items-center justify-center transition-colors ${
-              soundEnabled
-                ? 'bg-white hover:bg-[#f8f8ec] border-[#e2e0cf] text-[#177f6b]'
-                : 'bg-[#85362f]/10 border-[#85362f]/30 text-[#85362f]'
-            }`}
-          >
-            {soundEnabled ? (
-              <Volume2 className="w-3.5 h-3.5" />
-            ) : (
-              <VolumeX className="w-3.5 h-3.5" />
-            )}
           </button>
 
           {/* Sync Button */}

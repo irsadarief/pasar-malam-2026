@@ -20,7 +20,31 @@ const PUBLIC_CSV_PATH = path.resolve(__dirname, 'public', 'All_Ticket_011126.csv
 
 // Configurable Google Sheet CSV URL (configured ONLY via code / environment variable)
 // e.g.: "https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID>/gviz/tq?tqx=out:csv&sheet=All%20Tickets"
-const GOOGLE_SHEET_CSV_URL = process.env.GOOGLE_SHEET_CSV_URL || '';
+const GOOGLE_SHEET_CSV_URL =
+  process.env.GOOGLE_SHEET_CSV_URL ||
+  'https://docs.google.com/spreadsheets/d/19wpQ8x0ux3rUsOc4HjUi3xXW7ZldWWZntiVP_97iMJk/gviz/tq?tqx=out:csv&sheet=All%20Tickets';
+
+// Optional Google Apps Script Webhook URL for real-time two-way sync
+// (Set in .env or paste directly here once deployed from google_apps_script.js)
+const GOOGLE_SHEET_WEBHOOK_URL = process.env.GOOGLE_SHEET_WEBHOOK_URL || '';
+
+// Asynchronously forward real-time write operations to Google Sheet Webhook if configured
+async function forwardToGoogleSheet(payload: any) {
+  if (!GOOGLE_SHEET_WEBHOOK_URL || !GOOGLE_SHEET_WEBHOOK_URL.startsWith('http')) {
+    return;
+  }
+  try {
+    const res = await fetch(GOOGLE_SHEET_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(5000),
+    });
+    console.log(`[SHEETS SYNC] Forwarded ${payload.action} to Google Sheet Webhook (status: ${res.status}).`);
+  } catch (err: any) {
+    console.warn(`[SHEETS SYNC WARNING] Failed forwarding to Google Sheet Webhook:`, err?.message || err);
+  }
+}
 
 export interface TicketRecord {
   'Timestamp'?: string;
@@ -275,6 +299,14 @@ app.post('/api/checkin', (req: Request, res: Response) => {
 
   saveTicketsToDisk();
 
+  // Real-time synchronization to Google Sheet via Webhook if configured
+  forwardToGoogleSheet({
+    action: 'checkin',
+    id_tiket: ticket['ID Tiket'],
+    target_status: 'Terpakai',
+    waktu_kedatangan: timeStr,
+  });
+
   res.json({
     success: true,
     status: 'SUCCESS',
@@ -312,6 +344,13 @@ app.post('/api/checkin-batch', (req: Request, res: Response) => {
   }
 
   saveTicketsToDisk();
+
+  // Real-time batch synchronization to Google Sheet
+  forwardToGoogleSheet({
+    action: 'checkin_batch',
+    id_tikets: updatedTickets.map(t => t['ID Tiket']),
+    waktu_kedatangan: timeStr,
+  });
 
   res.json({
     success: true,
@@ -375,6 +414,12 @@ app.post('/api/attendees/add', (req: Request, res: Response) => {
 
   saveTicketsToDisk();
 
+  // Real-time synchronization to Google Sheet
+  forwardToGoogleSheet({
+    action: 'add_attendee',
+    tickets: newTickets,
+  });
+
   res.json({
     success: true,
     message: `Registered ${count} ticket(s) for ${namaClean}.`,
@@ -420,6 +465,15 @@ app.post('/api/attendees/update-ticket-id', (req: Request, res: Response) => {
 
   saveTicketsToDisk();
 
+  // Sync update to Google Sheet
+  if (modified.length > 0) {
+    forwardToGoogleSheet({
+      action: 'checkin_batch',
+      id_tikets: modified.filter(m => m['Status Tiket'] === 'Terpakai').map(m => m['ID Tiket']),
+      waktu_kedatangan: timeStr,
+    });
+  }
+
   res.json({
     success: true,
     message: `Updated ${modified.length} ticket number(s).`,
@@ -444,6 +498,7 @@ app.post('/api/manual-toggle', (req: Request, res: Response) => {
     return;
   }
 
+  const nowTime = new Date().toLocaleTimeString('id-ID', { hour12: false });
   if (target_status === 'Tersedia') {
     ticket['Status Tiket'] = 'Tersedia';
     ticket['Terpakai'] = 'Belum';
@@ -451,10 +506,17 @@ app.post('/api/manual-toggle', (req: Request, res: Response) => {
   } else {
     ticket['Status Tiket'] = 'Terpakai';
     ticket['Terpakai'] = 'Terpakai';
-    ticket['Waktu Kedatangan'] = new Date().toLocaleTimeString('id-ID', { hour12: false });
+    ticket['Waktu Kedatangan'] = nowTime;
   }
 
   saveTicketsToDisk();
+
+  forwardToGoogleSheet({
+    action: 'toggle',
+    id_tiket: ticket['ID Tiket'],
+    target_status: ticket['Status Tiket'],
+    waktu_kedatangan: ticket['Waktu Kedatangan'] || '',
+  });
   res.json({ success: true, ticket });
 });
 

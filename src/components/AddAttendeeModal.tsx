@@ -217,7 +217,7 @@ export const AddAttendeeModal: React.FC<AddAttendeeModalProps> = ({
                   </div>
                 </div>
               </div>
-
+              
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
                 <div>
                   <label className="block text-[11px] font-bold text-stone-600 mb-1">

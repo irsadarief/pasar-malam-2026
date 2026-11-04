@@ -227,7 +227,6 @@ export const AttendeeList: React.FC<AttendeeListProps> = ({
                     <th className="py-3 px-3.5">ID Tiket</th>
                     <th className="py-3 px-3.5">Attendee Name</th>
                     <th className="py-3 px-3.5">Kategori</th>
-                    <th className="py-3 px-3.5">Order ID</th>
                     <th className="py-3 px-3.5">Status Tiket</th>
                     <th className="py-3 px-3.5">Waktu Kedatangan</th>
                     <th className="py-3 px-3.5 text-right">Actions</th>
@@ -259,9 +258,6 @@ export const AttendeeList: React.FC<AttendeeListProps> = ({
                           <span className={`px-2 py-0.5 rounded-full text-[11px] border ${getCategoryBadge(ticket.Kategori)}`}>
                             {ticket.Kategori || 'Non-Member'}
                           </span>
-                        </td>
-                        <td className="py-3 px-3.5 font-mono text-stone-700 whitespace-nowrap">
-                          {ticket['Order ID'] || '—'}
                         </td>
                         <td className="py-3 px-3.5 whitespace-nowrap">
                           <span

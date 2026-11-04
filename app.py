@@ -26,10 +26,23 @@ from flask import Flask, jsonify, request, send_file, send_from_directory
 # Set your published Google Sheet CSV Export URL below in CODE (not via UI):
 # e.g.: "https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID>/gviz/tq?tqx=out:csv&sheet=All%20Tickets"
 # ==============================================================================
-#GOOGLE_SHEET_CSV_URL = os.environ.get("GOOGLE_SHEET_CSV_URL", "https://docs.google.com/spreadsheets/d/1MTcIOX71UHD8D24e1eYyyxIOIWvhUUUrL71S-o-VHjU/gviz/tq?tqx=out:csv&sheet=All%20Tickets")
-GOOGLE_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/19wpQ8x0ux3rUsOc4HjUi3xXW7ZldWWZntiVP_97iMJk/gviz/tq?tqx=out:csv&sheet=All%20Tickets"
-#LOCAL_CSV_PATH = os.path.join(os.path.dirname(__file__), "All_Ticket_011126.csv")
+GOOGLE_SHEET_CSV_URL = os.environ.get(
+    "GOOGLE_SHEET_CSV_URL",
+    "https://docs.google.com/spreadsheets/d/19wpQ8x0ux3rUsOc4HjUi3xXW7ZldWWZntiVP_97iMJk/gviz/tq?tqx=out:csv&sheet=All%20Tickets"
+)
+GOOGLE_SHEET_WEBHOOK_URL = os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", "")
+LOCAL_CSV_PATH = os.path.join(os.path.dirname(__file__), "All_Ticket_011126.csv")
 STATIC_FOLDER = os.path.join(os.path.dirname(__file__), "dist")
+
+def forward_to_google_sheet(payload):
+    """Sends asynchronous/background update to Google Apps Script Webhook if configured."""
+    if not GOOGLE_SHEET_WEBHOOK_URL or not GOOGLE_SHEET_WEBHOOK_URL.startswith("http"):
+        return
+    try:
+        import requests
+        requests.post(GOOGLE_SHEET_WEBHOOK_URL, json=payload, timeout=3)
+    except Exception as e:
+        print(f"[SHEETS SYNC WARNING] Failed forwarding to Google Sheet: {e}")
 
 app = Flask(__name__, static_folder=STATIC_FOLDER if os.path.exists(STATIC_FOLDER) else "static")
 
@@ -166,6 +179,13 @@ def checkin():
 
     save_local_tickets()
 
+    forward_to_google_sheet({
+        "action": "checkin",
+        "id_tiket": ticket.get("ID Tiket"),
+        "target_status": "Terpakai",
+        "waktu_kedatangan": now_str
+    })
+
     return jsonify({
         "success": True,
         "status": "SUCCESS",
@@ -194,6 +214,13 @@ def checkin_batch():
             updated.append(t)
 
     save_local_tickets()
+
+    forward_to_google_sheet({
+        "action": "checkin_batch",
+        "id_tikets": [t.get("ID Tiket") for t in updated if t.get("ID Tiket")],
+        "waktu_kedatangan": now_str
+    })
+
     return jsonify({
         "success": True,
         "count": len(updated),
@@ -252,6 +279,12 @@ def add_attendee():
         created.append(rec)
 
     save_local_tickets()
+
+    forward_to_google_sheet({
+        "action": "add_attendee",
+        "tickets": created
+    })
+
     return jsonify({
         "success": True,
         "message": f"Registered {jumlah} tickets for {nama}.",

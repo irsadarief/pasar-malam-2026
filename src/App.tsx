@@ -19,10 +19,23 @@ import { TicketCard } from './components/TicketCard';
 import { AttendeeList } from './components/AttendeeList';
 import { AddAttendeeModal } from './components/AddAttendeeModal';
 import { GroupCheckinModal } from './components/GroupCheckinModal';
+import { PasswordGate } from './components/PasswordGate';
 import { GateMetrics, ScanResult, Ticket } from './types';
 import { playErrorTone, playSuccessBeep, playWarningTone } from './utils/audio';
 
 export default function App() {
+  // Gatekeeper access password protection ("Alvik711")
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        return sessionStorage.getItem('pm2026_auth') === 'authenticated';
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  });
+
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [selectedTicket, setSelectedTicket] = useState<Ticket | null>(null);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
@@ -405,6 +418,11 @@ export default function App() {
     window.location.href = '/api/export';
   };
 
+  // If not authenticated, require password gate
+  if (!isAuthenticated) {
+    return <PasswordGate onUnlock={() => setIsAuthenticated(true)} />;
+  }
+
   return (
     <div className="min-h-screen bg-[#f8f8ec] text-stone-900 flex flex-col font-sans selection:bg-[#fcc844] selection:text-stone-900">
       {/* Minimized Single-Row Top Toolbar */}
@@ -501,19 +519,15 @@ export default function App() {
               </div>
               <div className="p-3 bg-white border border-[#e2e0cf] rounded-xl shadow-2xs flex items-center justify-between">
                 <div>
-                  <span className="text-[11px] text-stone-500 block font-bold">Category Ratio</span>
-                  <div className="text-xs font-bold text-stone-800 mt-1 flex items-center gap-2">
-                    <span className="text-[#85362f]">PPI: {metrics.ppi.checkedIn}/{metrics.ppi.total}</span>
-                    <span className="text-stone-300">·</span>
-                    <span className="text-[#177f6b]">SIS: {metrics.sis.checkedIn}/{metrics.sis.total}</span>
-                  </div>
+                  <span className="text-[11px] text-stone-500 block font-bold">Registration Action</span>
+                  <span className="text-xs font-semibold text-stone-700">On-site Gate Entry</span>
                 </div>
                 <button
                   onClick={() => setIsAddAttendeeOpen(true)}
-                  className="px-3 py-2 bg-[#177f6b] hover:bg-[#136a59] text-white font-bold text-xs rounded-lg transition-colors flex items-center gap-1 shadow-xs"
+                  className="px-3.5 py-2 bg-[#177f6b] hover:bg-[#136a59] text-white font-bold text-xs rounded-lg transition-colors flex items-center gap-1.5 shadow-xs"
                 >
                   <Plus className="w-3.5 h-3.5 stroke-[3]" />
-                  <span>Add Walk-in</span>
+                  <span>+ Add Walk-in</span>
                 </button>
               </div>
             </div>
