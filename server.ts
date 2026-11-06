@@ -26,7 +26,7 @@ const GOOGLE_SHEET_CSV_URL =
 
 // Optional Google Apps Script Webhook URL for real-time two-way sync
 // (Set in .env or paste directly here once deployed from google_apps_script.js)
-const GOOGLE_SHEET_WEBHOOK_URL = process.env.GOOGLE_SHEET_WEBHOOK_URL || '';
+const GOOGLE_SHEET_WEBHOOK_URL = 'https://script.google.com/macros/s/AKfycbxPDWieLAMlpKqAlwQefYqTtQ8AYhp1RGvjmeC-yWZgyVmqS7pSdM0_tuqp1FeNdNwg_g/exec';
 
 // Asynchronously forward real-time write operations to Google Sheet Webhook if configured
 async function forwardToGoogleSheet(payload: any) {
@@ -72,6 +72,48 @@ export interface TicketRecord {
 
 let ticketsCache: TicketRecord[] = [];
 let csvHeaders: string[] = [];
+
+export interface WalkInItem {
+  category: 'PPI/SIS' | 'Reduced' | 'Adult';
+  count: number;
+  pricePerTicket: number;
+}
+
+export interface WalkInRegistration {
+  id: string;
+  nama: string;
+  phone?: string;
+  email?: string;
+  items: WalkInItem[];
+  totalTickets: number;
+  totalCostSEK: number;
+  createdAt: string;
+  status: 'PENDING_PAYMENT' | 'APPROVED';
+  orderId?: string;
+  assignedTicketIds?: string[];
+  approvedAt?: string;
+}
+
+const WALKIN_JSON_PATH = path.resolve(__dirname, 'walkin_registrations.json');
+let walkInRegistrations: WalkInRegistration[] = [];
+
+// Load walk-in registrations from disk if exists
+try {
+  if (fs.existsSync(WALKIN_JSON_PATH)) {
+    const raw = fs.readFileSync(WALKIN_JSON_PATH, 'utf-8');
+    walkInRegistrations = JSON.parse(raw);
+  }
+} catch (e) {
+  console.warn('[WALKIN] Failed to load walkin_registrations.json:', e);
+}
+
+function saveWalkInRegistrations() {
+  try {
+    fs.writeFileSync(WALKIN_JSON_PATH, JSON.stringify(walkInRegistrations, null, 2), 'utf-8');
+  } catch (e) {
+    console.error('[WALKIN] Failed to save walkin_registrations.json:', e);
+  }
+}
 
 // Helper: Parse CSV with robust RFC 4180 handling for quoted fields with commas/newlines
 function parseCSV(text: string): { headers: string[]; records: TicketRecord[] } {
@@ -518,6 +560,185 @@ app.post('/api/manual-toggle', (req: Request, res: Response) => {
     waktu_kedatangan: ticket['Waktu Kedatangan'] || '',
   });
   res.json({ success: true, ticket });
+});
+
+// ==========================================
+// WALKIN SELF-REGISTRATION & APPROVAL API
+// ==========================================
+
+// POST /api/walkin/register: Public endpoint for visitors at /register
+app.post('/api/walkin/register', (req: Request, res: Response) => {
+  const { nama, phone, email, items } = req.body || {};
+
+  if (!nama || typeof nama !== 'string' || !nama.trim()) {
+    res.status(400).json({ success: false, error: 'Nama pengunjung wajib diisi.' });
+    return;
+  }
+
+  if (!Array.isArray(items) || items.length === 0) {
+    res.status(400).json({ success: false, error: 'Pilih minimal 1 kategori tiket.' });
+    return;
+  }
+
+  const PRICING: Record<string, number> = {
+    'PPI/SIS': 40,
+    'Reduced': 50,
+    'Adult': 90,
+  };
+
+  const parsedItems: WalkInItem[] = [];
+  let totalTickets = 0;
+  let totalCostSEK = 0;
+
+  for (const it of items) {
+    const cat = it.category;
+    const count = Math.max(0, parseInt(it.count || '0', 10));
+    if (count > 0 && PRICING[cat] !== undefined) {
+      const price = PRICING[cat];
+      parsedItems.push({
+        category: cat,
+        count,
+        pricePerTicket: price,
+      });
+      totalTickets += count;
+      totalCostSEK += count * price;
+    }
+  }
+
+  if (totalTickets <= 0) {
+    res.status(400).json({ success: false, error: 'Jumlah tiket harus lebih dari 0.' });
+    return;
+  }
+
+  const now = new Date();
+  const regId = `WI-${Date.now()}`;
+  const record: WalkInRegistration = {
+    id: regId,
+    nama: nama.trim(),
+    phone: phone ? String(phone).trim() : '',
+    email: email ? String(email).trim() : '',
+    items: parsedItems,
+    totalTickets,
+    totalCostSEK,
+    createdAt: now.toISOString(),
+    status: 'PENDING_PAYMENT',
+  };
+
+  walkInRegistrations.unshift(record);
+  saveWalkInRegistrations();
+
+  res.json({
+    success: true,
+    message: 'Registrasi walk-in berhasil diajukan.',
+    registration: record,
+  });
+});
+
+// GET /api/walkin/list: Get all walk-in submissions for admin panel
+app.get('/api/walkin/list', (_req: Request, res: Response) => {
+  res.json({
+    success: true,
+    registrations: walkInRegistrations,
+    pendingCount: walkInRegistrations.filter(r => r.status === 'PENDING_PAYMENT').length,
+    approvedCount: walkInRegistrations.filter(r => r.status === 'APPROVED').length,
+  });
+});
+
+// POST /api/walkin/approve: Admin checks payment and assigns ticket IDs (bulk with custom or auto-increment)
+app.post('/api/walkin/approve', (req: Request, res: Response) => {
+  const { registrationId, customTicketIds, markAsCheckedIn } = req.body || {};
+
+  const record = walkInRegistrations.find(r => r.id === registrationId);
+  if (!record) {
+    res.status(404).json({ success: false, error: 'Registrasi walk-in tidak ditemukan.' });
+    return;
+  }
+
+  if (record.status === 'APPROVED') {
+    res.status(400).json({ success: false, error: 'Registrasi ini sudah diverifikasi sebelumnya.' });
+    return;
+  }
+
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString('id-ID', { hour12: false });
+  const timestampStr = `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear()} ${now.toLocaleTimeString('en-US', { hour12: false })}`;
+  const orderId = `ORD-SWISH-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+
+  // Determine ticket IDs: use customTicketIds array if provided, otherwise auto-increment
+  let startNum = getNextTicketIdNumber();
+  const assignedIds: string[] = [];
+  const createdTickets: TicketRecord[] = [];
+
+  let ticketIndex = 1;
+  for (const item of record.items) {
+    // Map item category label to dataset Kategori
+    let categoryLabel = 'Non-Member';
+    if (item.category === 'PPI/SIS') categoryLabel = 'PPI/SIS Member';
+    else if (item.category === 'Reduced') categoryLabel = 'Reduced (Child/Intl/Senior)';
+    else categoryLabel = 'Adult (18-67)';
+
+    for (let c = 0; c < item.count; c++) {
+      let ticketId = '';
+      if (Array.isArray(customTicketIds) && customTicketIds[assignedIds.length]) {
+        ticketId = String(customTicketIds[assignedIds.length]).trim();
+      } else {
+        ticketId = `PM2026-${String(startNum).padStart(4, '0')}`;
+        startNum++;
+      }
+
+      assignedIds.push(ticketId);
+
+      const isCheckedIn = Boolean(markAsCheckedIn);
+      const newTicket: TicketRecord = {
+        Timestamp: timestampStr,
+        Nama: record.nama,
+        Kategori: categoryLabel,
+        Email: record.email || '',
+        'No Hp': record.phone || '',
+        Jumlah: String(record.totalTickets),
+        'QR Code': `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${ticketId}`,
+        'ID Tiket': ticketId,
+        Counter: String(ticketIndex),
+        'Nama Kapital': record.nama.toUpperCase(),
+        Terpakai: isCheckedIn ? 'Terpakai' : 'Belum',
+        'Status Pembayaran': 'Lunas (Swish Walk-in)',
+        'Order ID': orderId,
+        'Status Pengiriman WA': 'ON-SITE-SWISH',
+        'Merged Doc ID - Generate dan Kirim Tiket': '',
+        'Merged Doc URL - Generate dan Kirim Tiket': '',
+        'Link to merged Doc - Generate dan Kirim Tiket': `Tiket Pasar Malam 2026 - ${record.nama}`,
+        'Document Merge Status - Generate dan Kirim Tiket': 'Swish Walk-In Verified',
+        'Status Tiket': isCheckedIn ? 'Terpakai' : 'Tersedia',
+        'Waktu Kedatangan': isCheckedIn ? timeStr : '',
+      };
+
+      createdTickets.push(newTicket);
+      ticketsCache.push(newTicket);
+      ticketIndex++;
+    }
+  }
+
+  // Update record state
+  record.status = 'APPROVED';
+  record.orderId = orderId;
+  record.assignedTicketIds = assignedIds;
+  record.approvedAt = now.toISOString();
+
+  saveWalkInRegistrations();
+  saveTicketsToDisk();
+
+  // Forward to Google Sheet
+  forwardToGoogleSheet({
+    action: 'add_attendee',
+    tickets: createdTickets,
+  });
+
+  res.json({
+    success: true,
+    message: `Berhasil verifikasi pembayaran Swish dan menerbitkan ${assignedIds.length} tiket untuk ${record.nama}.`,
+    registration: record,
+    createdTickets,
+  });
 });
 
 // GET /api/export: Generates and downloads current checked-in dataset as CSV

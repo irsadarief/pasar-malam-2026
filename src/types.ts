@@ -32,6 +32,27 @@ export interface ScanResult {
   checkedInAt?: string;
 }
 
+export interface WalkInItem {
+  category: 'PPI/SIS' | 'Reduced' | 'Adult';
+  count: number;
+  pricePerTicket: number;
+}
+
+export interface WalkInRegistration {
+  id: string; // e.g. WI-1700000000000
+  nama: string;
+  phone?: string;
+  email?: string;
+  items: WalkInItem[];
+  totalTickets: number;
+  totalCostSEK: number;
+  createdAt: string; // ISO or local formatted
+  status: 'PENDING_PAYMENT' | 'APPROVED';
+  orderId?: string;
+  assignedTicketIds?: string[];
+  approvedAt?: string;
+}
+
 export interface GateMetrics {
   total: number;
   checkedIn: number;

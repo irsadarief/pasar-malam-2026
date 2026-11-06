@@ -20,7 +20,10 @@ import { AttendeeList } from './components/AttendeeList';
 import { AddAttendeeModal } from './components/AddAttendeeModal';
 import { GroupCheckinModal } from './components/GroupCheckinModal';
 import { PasswordGate } from './components/PasswordGate';
-import { GateMetrics, ScanResult, Ticket } from './types';
+import { WalkInRegisterPage } from './components/WalkInRegisterPage';
+import { WalkInQueueTable } from './components/WalkInQueueTable';
+import { VerifyWalkInModal } from './components/VerifyWalkInModal';
+import { GateMetrics, ScanResult, Ticket, WalkInRegistration } from './types';
 import { playErrorTone, playSuccessBeep, playWarningTone } from './utils/audio';
 
 export default function App() {
@@ -57,10 +60,32 @@ export default function App() {
   // Add Attendee Modal State
   const [isAddAttendeeOpen, setIsAddAttendeeOpen] = useState<boolean>(false);
 
+  // Walk-in queue state & modal
+  const [walkIns, setWalkIns] = useState<WalkInRegistration[]>([]);
+  const [isWalkInLoading, setIsWalkInLoading] = useState<boolean>(false);
+  const [activeVerifyingWalkIn, setActiveVerifyingWalkIn] = useState<WalkInRegistration | null>(null);
+  const [showWalkInQueue, setShowWalkInQueue] = useState<boolean>(false);
+
   // Group Check-In Modal State
   const [isGroupModalOpen, setIsGroupModalOpen] = useState<boolean>(false);
   const [groupScannedTicket, setGroupScannedTicket] = useState<Ticket | null>(null);
   const [groupRelatedTickets, setGroupRelatedTickets] = useState<Ticket[]>([]);
+
+  // Fetch walk-in registrations
+  const fetchWalkIns = useCallback(async () => {
+    try {
+      setIsWalkInLoading(true);
+      const res = await fetch('/api/walkin/list');
+      if (res.ok) {
+        const data = await res.json();
+        setWalkIns(data.registrations || []);
+      }
+    } catch (e) {
+      console.warn('Failed fetching walk-ins:', e);
+    } finally {
+      setIsWalkInLoading(false);
+    }
+  }, []);
 
   // Fetch tickets manifest from backend API
   const fetchTickets = useCallback(async () => {
@@ -90,7 +115,14 @@ export default function App() {
 
   useEffect(() => {
     fetchTickets();
-  }, [fetchTickets]);
+    fetchWalkIns();
+
+    // Poll every 10 seconds for new walk-in submissions from /register
+    const timer = setInterval(() => {
+      fetchWalkIns();
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [fetchTickets, fetchWalkIns]);
 
   // Compute live gate metrics
   const metrics: GateMetrics = useMemo(() => {
@@ -413,12 +445,57 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedTicket, isProcessing, isGroupModalOpen, isAddAttendeeOpen]);
 
+  // Approve Walk-in Registration (Verify Swish & Issue Tickets)
+  const handleApproveWalkIn = async (
+    registrationId: string,
+    customTicketIds: string[],
+    markAsCheckedIn: boolean
+  ) => {
+    try {
+      const res = await fetch('/api/walkin/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          registrationId,
+          customTicketIds,
+          markAsCheckedIn,
+        }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success) {
+        confetti({
+          particleCount: 50,
+          spread: 60,
+          origin: { y: 0.7 },
+        });
+        playSuccessBeep();
+        // Refresh both tickets and walk-in lists
+        await fetchTickets();
+        await fetchWalkIns();
+      } else {
+        alert(data.error || 'Failed to approve walk-in.');
+      }
+    } catch (e: any) {
+      alert(`Error approving walk-in: ${e?.message || e}`);
+    }
+  };
+
   // Export CSV handler
   const handleExportCSV = () => {
     window.location.href = '/api/export';
   };
 
-  // If not authenticated, require password gate
+  // 1. PUBLIC VISITOR REGISTRATION ROUTE (/register)
+  // Check if current URL pathname is /register
+  const isRegisterRoute = typeof window !== 'undefined' &&
+    (window.location.pathname === '/register' || window.location.pathname.startsWith('/register'));
+
+  if (isRegisterRoute) {
+    return <WalkInRegisterPage />;
+  }
+
+  // 2. ADMIN GATEKEEPER PASSCODE PROTECTION ("Alvik711")
   if (!isAuthenticated) {
     return <PasswordGate onUnlock={() => setIsAuthenticated(true)} />;
   }
@@ -519,18 +596,40 @@ export default function App() {
               </div>
               <div className="p-3 bg-white border border-[#e2e0cf] rounded-xl shadow-2xs flex items-center justify-between">
                 <div>
-                  <span className="text-[11px] text-stone-500 block font-bold">Registration Action</span>
-                  <span className="text-xs font-semibold text-stone-700">On-site Gate Entry</span>
+                  <span className="text-[11px] text-stone-500 block font-bold">Walk-in Swish Queue</span>
+                  <div className="mt-0.5">
+                    <span className="font-extrabold text-xs text-stone-900">
+                      {walkIns.filter(w => w.status === 'PENDING_PAYMENT').length} Pending
+                    </span>
+                  </div>
                 </div>
-                <button
-                  onClick={() => setIsAddAttendeeOpen(true)}
-                  className="px-3.5 py-2 bg-[#177f6b] hover:bg-[#136a59] text-white font-bold text-xs rounded-lg transition-colors flex items-center gap-1.5 shadow-xs"
-                >
-                  <Plus className="w-3.5 h-3.5 stroke-[3]" />
-                  <span>+ Add Walk-in</span>
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => setShowWalkInQueue(v => !v)}
+                    className={`px-3 py-2 font-bold text-xs rounded-lg transition-colors flex items-center gap-1 border shadow-xs ${
+                      showWalkInQueue
+                        ? 'bg-[#85362f] text-white border-[#85362f]'
+                        : 'bg-white hover:bg-[#f8f8ec] text-stone-800 border-[#e2e0cf]'
+                    }`}
+                  >
+                    <span>{showWalkInQueue ? 'Hide Queue' : 'View Queue'}</span>
+                    {walkIns.filter(w => w.status === 'PENDING_PAYMENT').length > 0 && (
+                      <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                    )}
+                  </button>
+                </div>
               </div>
             </div>
+
+            {/* Optional Walk-in Swish Queue Table (shown when toggled or when pending entries exist) */}
+            {showWalkInQueue && (
+              <WalkInQueueTable
+                registrations={walkIns}
+                isLoading={isWalkInLoading}
+                onRefresh={fetchWalkIns}
+                onVerify={reg => setActiveVerifyingWalkIn(reg)}
+              />
+            )}
 
             {/* Split Grid: Left Side Inspector & Right Side Attendee Table */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
@@ -635,6 +734,15 @@ export default function App() {
         onCheckInSingle={(ticket) => handleCheckInSingle(ticket['ID Tiket'])}
         onCancel={() => setIsGroupModalOpen(false)}
         isProcessing={isProcessing}
+      />
+
+      {/* Verify Swish Walk-In Modal */}
+      <VerifyWalkInModal
+        registration={activeVerifyingWalkIn}
+        isOpen={Boolean(activeVerifyingWalkIn)}
+        onClose={() => setActiveVerifyingWalkIn(null)}
+        onApprove={handleApproveWalkIn}
+        nextSuggestedNumber={tickets.length + 1}
       />
     </div>
   );

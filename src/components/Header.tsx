@@ -113,6 +113,17 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="hidden sm:inline">Add Attendee</span>
           </button>
 
+          {/* Quick link to /register */}
+          <a
+            href="/register"
+            target="_blank"
+            rel="noreferrer"
+            className="hidden sm:flex px-2.5 py-1.5 rounded-lg bg-[#f8f8ec] hover:bg-stone-200 border border-[#e2e0cf] text-stone-700 text-xs font-bold items-center gap-1 transition-colors"
+            title="Open visitor self-registration page (/register)"
+          >
+            <span>/register</span>
+          </a>
+
           {/* Sync Button */}
           <button
             onClick={onSyncNow}
